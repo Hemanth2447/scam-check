@@ -307,6 +307,8 @@ def verify_sender(sender: str):
 # ==========================================================
 # MODEL PREDICTION
 # ==========================================================
+
+import gc
 def predict_message(message: str):
 
     inputs = tokenizer(
@@ -314,7 +316,7 @@ def predict_message(message: str):
         return_tensors="pt",
         truncation=True,
         padding=True,
-        max_length=96
+        max_length=64
     )
 
     inputs = {
@@ -339,6 +341,11 @@ def predict_message(message: str):
    
     prediction = int(torch.argmax(probabilities))
     confidence = float(probabilities[prediction]) * 100
+
+    del inputs
+    del outputs
+    del probabilities
+    gc.collect()
 
     return {
         "prediction": LABELS.get(prediction, "SCAM"),
