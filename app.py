@@ -60,7 +60,8 @@ tokenizer = AutoTokenizer.from_pretrained(
 )
 
 model = AutoModelForSequenceClassification.from_pretrained(
-    MODEL_DIR
+    MODEL_DIR,
+    low_cpu_mem_usage=True
 )
 
 model.to(DEVICE)
