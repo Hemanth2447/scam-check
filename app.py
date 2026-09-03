@@ -100,9 +100,7 @@ LABELS = {
 
     0: "SAFE",
 
-    1: "SCAM",
-
-    2: "NON_BANK"
+    1: "SCAM"
 
 }
 
@@ -170,13 +168,6 @@ SCAM_UNVERIFIED = [
 
 ]
 
-NON_BANK_RESPONSE = [
-
-    "This message is not related to banking.",
-
-    "Use Sentry AI if you still wish to analyse it."
-
-]
 
 # ==========================================================
 # FASTAPI
@@ -316,70 +307,45 @@ def verify_sender(sender: str):
 # ==========================================================
 # MODEL PREDICTION
 # ==========================================================
-
 def predict_message(message: str):
 
     inputs = tokenizer(
-
         message,
-
         return_tensors="pt",
-
         truncation=True,
-
         padding=True,
-
         max_length=96
-
     )
 
     inputs = {
-
         k: v.to(DEVICE)
-
         for k, v in inputs.items()
-
     }
     start = time.time()
 
     with torch.inference_mode():
-
         outputs = model(**inputs)
 
     print(f"Inference Time: {time.time() - start:.2f} sec")
 
     probabilities = torch.softmax(
-
         outputs.logits,
-
         dim=1
-
     )[0]
 
     safe_prob = float(probabilities[0]) * 100
-
     scam_prob = float(probabilities[1]) * 100
-
-    non_bank_prob = float(probabilities[2]) * 100
-
+    
+   
     prediction = int(torch.argmax(probabilities))
-
     confidence = float(probabilities[prediction]) * 100
 
     return {
-
-        "prediction": LABELS[prediction],
-
+        "prediction": LABELS.get(prediction, "SCAM"),
         "confidence": round(confidence, 2),
-
         "safe_probability": round(safe_prob, 2),
-
-        "scam_probability": round(scam_prob, 2),
-
-        "non_bank_probability": round(non_bank_prob, 2)
-
+        "scam_probability": round(scam_prob, 2)
     }
-
 
 # ==========================================================
 # RISK SCORE
@@ -393,15 +359,6 @@ def calculate_risk(
 
 ):
 
-    if prediction["prediction"] == "NON_BANK":
-
-        return {
-
-            "risk_score": 0,
-
-            "risk_level": "NON_BANK"
-
-        }
 
     risk = prediction["scam_probability"]
 
@@ -454,9 +411,7 @@ def generate_explanation(
 
 ):
 
-    if prediction == "NON_BANK":
 
-        return NON_BANK_RESPONSE
 
     verified = sender_info["verified"]
 
@@ -511,27 +466,7 @@ def build_response(
     # NON BANK
     # ---------------------------------------------
 
-    if prediction["prediction"] == "NON_BANK":
 
-       return {
-
-        "prediction": "NON_BANK",
-
-        "classification_confidence": prediction["confidence"],
-
-        "risk_score": 0,
-
-        "risk_level": "NON_BANK",
-
-        "sender_status": sender_info["status"],
-
-        "sender_id": sender_info["sender_id"],
-
-        "bank_name": sender_info["bank_name"],
-
-        "reasons": NON_BANK_RESPONSE
-
-    }
 
     # ---------------------------------------------
     # Risk Calculation
