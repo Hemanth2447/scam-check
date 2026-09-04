@@ -37,7 +37,6 @@ HEADERS_FILE = (
     / "sender_validation"
     / "verified_bank_headers.json"
 )
-
 # ==========================================================
 # LOAD MODEL
 # ==========================================================
@@ -57,28 +56,19 @@ print(f"Device : {DEVICE}")
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_DIR
 )
-import torch
 
-# Load directly into memory-efficient mode
+# Load directly in float16 to fit safely under Render's 512MB RAM limit
 model = AutoModelForSequenceClassification.from_pretrained(
     MODEL_DIR,
     low_cpu_mem_usage=True,
-    torch_dtype=torch.float32 
+    torch_dtype=torch.float16
 )
 model.eval()
 
-# Quantize immediately
-model = torch.quantization.quantize_dynamic(
-    model, 
-    {torch.nn.Linear}, 
-    dtype=torch.qint8
-)
-
 torch.set_num_threads(1)
 
-print("✅ Model loaded and quantized successfully.")
-print("✅ Quantized model memory footprint: ~140MB")
-
+print("✅ Model loaded successfully in float16 mode.")
+print("✅ Estimated RAM footprint: ~300MB total")
 # ==========================================================
 # LOAD VERIFIED HEADERS
 # ==========================================================
