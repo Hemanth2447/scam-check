@@ -23,7 +23,6 @@ from transformers import (
     AutoModelForSequenceClassification
 )
 
-
 # ==========================================================
 # PATHS
 # ==========================================================
@@ -58,19 +57,22 @@ print(f"Device : {DEVICE}")
 tokenizer = AutoTokenizer.from_pretrained(
     MODEL_DIR
 )
-
 model = AutoModelForSequenceClassification.from_pretrained(
-    MODEL_DIR,
+    MODEL_DIR, 
     low_cpu_mem_usage=True
 )
-
-model.to(DEVICE)
-
 model.eval()
+
+# Apply 8-bit dynamic quantization to drastically cut RAM usage (CPU-optimized)
+model = torch.quantization.quantize_dynamic(
+    model, 
+    {torch.nn.Linear}, 
+    dtype=torch.qint8
+)
+
 torch.set_num_threads(1)
 
-print("[SUCCESS] Model Loaded.")
-
+print("[SUCCESS] Model Loaded & Quantized.")
 # ==========================================================
 # LOAD VERIFIED HEADERS
 # ==========================================================
