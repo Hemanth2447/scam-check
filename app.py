@@ -1,21 +1,15 @@
 # ==========================================================
 # SENTRY PAY - BANK SCAM DETECTION API
 # app.py
-#
-# Part 1
-# Imports
-# Configuration
-# Model Loading
-# Sender Header Loading
-# FastAPI Initialization
 # ==========================================================
 
 import json
 import torch
 import time
+import gc
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
 
 from transformers import (
@@ -37,13 +31,10 @@ HEADERS_FILE = (
     / "sender_validation"
     / "verified_bank_headers.json"
 )
-# ==========================================================
-# LOAD MODEL
-# ==========================================================
 
-print("=" * 60)
-print(" LOADING SENTRY MODEL ")
-print("=" * 60)
+# ==========================================================
+# DEVICE CONFIGURATION
+# ==========================================================
 
 DEVICE = torch.device(
     "cuda"
@@ -53,28 +44,39 @@ DEVICE = torch.device(
 
 print(f"Device : {DEVICE}")
 
-tokenizer = AutoTokenizer.from_pretrained(
-    MODEL_DIR
-)
+# ==========================================================
+# LAZY LOADING STATE (Prevents Render OOM on startup)
+# ==========================================================
 
-# Load directly in float16 to fit safely under Render's 512MB RAM limit
-model = AutoModelForSequenceClassification.from_pretrained(
-    MODEL_DIR,
-    low_cpu_mem_usage=True,
-    torch_dtype=torch.float16
-)
-model.eval()
+model = None
+tokenizer = None
 
-torch.set_num_threads(1)
+def get_model_and_tokenizer():
+    global model, tokenizer
+    if model is None:
+        print("=" * 60)
+        print(" LOADING SENTRY MODEL ON-DEMAND ")
+        print("=" * 60)
+        
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+        
+        model = AutoModelForSequenceClassification.from_pretrained(
+            MODEL_DIR,
+            low_cpu_mem_usage=True,
+            torch_dtype=torch.float16
+        )
+        model.eval()
+        torch.set_num_threads(1)
+        
+        gc.collect()
+        print("✅ Model loaded successfully in float16 mode.")
+    return model, tokenizer
 
-print("✅ Model loaded successfully in float16 mode.")
-print("✅ Estimated RAM footprint: ~300MB total")
 # ==========================================================
 # LOAD VERIFIED HEADERS
 # ==========================================================
 
 print()
-
 print("=" * 60)
 print(" LOADING VERIFIED TRAI HEADERS ")
 print("=" * 60)
@@ -84,7 +86,6 @@ with open(
     "r",
     encoding="utf-8"
 ) as f:
-
     VERIFIED_HEADERS = json.load(f)
 
 print(
@@ -96,11 +97,8 @@ print(
 # ==========================================================
 
 LABELS = {
-
     0: "SAFE",
-
     1: "SCAM"
-
 }
 
 # ==========================================================
@@ -108,78 +106,49 @@ LABELS = {
 # ==========================================================
 
 SAFE_VERIFIED = [
-
     "The message was classified as a legitimate banking notification.",
-
     "The sender ID matches an officially registered banking header.",
-
     "The calculated risk score is very low."
-
 ]
 
 SAFE_UNVERIFIED = [
-
     "The message was classified as a legitimate banking notification.",
-
     "The sender ID could not be verified.",
-
     "The calculated risk score is low."
-
 ]
 
 MODERATE_VERIFIED = [
-
     "The message requires additional attention.",
-
     "The sender ID is officially verified.",
-
     "Verify the information before taking action."
-
 ]
 
 MODERATE_UNVERIFIED = [
-
     "The message requires additional attention.",
-
     "The sender ID could not be verified.",
-
     "Proceed carefully before responding."
-
 ]
 
 SCAM_VERIFIED = [
-
     "The message has been classified as high risk.",
-
     "The sender ID is verified but the content appears suspicious.",
-
     "Avoid acting until independently verified."
-
 ]
 
 SCAM_UNVERIFIED = [
-
     "The message has been classified as high risk.",
-
     "The sender ID could not be verified.",
-
     "Do not interact with the message until verified."
-
 ]
-
 
 # ==========================================================
 # FASTAPI
 # ==========================================================
 
 app = FastAPI(
-
     title="Sentry Pay Scam Detection API",
-
     version="1.0.0"
-
 )
-from fastapi import Request
 
 @app.middleware("http")
 async def handle_head_requests(request: Request, call_next):
@@ -208,13 +177,10 @@ def health():
 # ==========================================================
 
 class AnalyzeRequest(BaseModel):
-
     sender: str = ""
-
     message: str
 
 print()
-
 print("=" * 60)
 print(" API READY ")
 print("=" * 60)
@@ -222,12 +188,8 @@ print("=" * 60)
 # ==========================================================
 # SENDER NORMALIZATION
 # ==========================================================
-# ==========================================================
-# SENDER NORMALIZATION
-# ==========================================================
 
 def normalize_sender(sender: str):
-
     if sender is None:
         return ""
 
@@ -238,79 +200,56 @@ def normalize_sender(sender: str):
 
     sender = sender.replace(" ", "")
 
-    # Split using '-'
     parts = sender.split("-")
 
-    # Find only valid 6 or 7 character header
     for part in parts:
         part = part.strip()
         if 6 <= len(part) <= 7:
-
             return part
 
-    # If no '-' and already 6-7 chars
     if 6 <= len(sender) <= 7:
-
         return sender
 
     return ""
+
 # ==========================================================
 # VERIFY TRAI HEADER
 # ==========================================================
 
 def verify_sender(sender: str):
-
     sender = normalize_sender(sender)
 
     if sender == "":
-
         return {
-
             "verified": False,
-
             "status": "NOT_PROVIDED",
-
             "bank_name": None,
-
             "sender_id": ""
-
         }
 
     if sender in VERIFIED_HEADERS:
-
         return {
-
             "verified": True,
-
             "status": "VERIFIED",
-
             "bank_name": VERIFIED_HEADERS[sender],
-
             "sender_id": sender
-
         }
 
     return {
-
         "verified": False,
-
         "status": "UNVERIFIED",
-
         "bank_name": None,
-
         "sender_id": sender
-
     }
 
-
 # ==========================================================
-# MODEL PREDICTION
+# MODEL PREDICTION (With Lazy Loading)
 # ==========================================================
 
-import gc
 def predict_message(message: str):
+    curr_model, curr_tokenizer = get_model_and_tokenizer()
 
-    inputs = tokenizer(
+    inputs = curr_tokenizer(
         message,
         return_tensors="pt",
         truncation=True,
@@ -322,10 +261,11 @@ def predict_message(message: str):
         k: v.to(DEVICE)
         for k, v in inputs.items()
     }
+    
     start = time.time()
 
     with torch.inference_mode():
-        outputs = model(**inputs)
+        outputs = curr_model(**inputs)
 
     print(f"Inference Time: {time.time() - start:.2f} sec")
 
@@ -337,7 +277,6 @@ def predict_message(message: str):
     safe_prob = float(probabilities[0]) * 100
     scam_prob = float(probabilities[1]) * 100
     
-   
     prediction = int(torch.argmax(probabilities))
     confidence = float(probabilities[prediction]) * 100
 
@@ -358,49 +297,31 @@ def predict_message(message: str):
 # ==========================================================
 
 def calculate_risk(
-
     prediction,
-
     verified
-
 ):
-
-
     risk = prediction["scam_probability"]
 
     if verified:
-
         risk = risk - 10
 
     risk = max(0, min(100, risk))
 
     if risk <= 50:
-
         level = "SAFE"
-
     elif risk <= 75:
-
         level = "MODERATE"
-
     else:
-
         level = "HIGH_RISK"
 
     return {
-
         "risk_score": round(risk, 2),
-
         "risk_level": level
-
     }
 
-
 print()
-
 print("[SUCCESS] Prediction Engine Loaded.")
-
 print("[SUCCESS] Sender Validator Loaded.")
-
 print("[SUCCESS] Risk Engine Loaded.")
 
 # ==========================================================
@@ -408,163 +329,78 @@ print("[SUCCESS] Risk Engine Loaded.")
 # ==========================================================
 
 def generate_explanation(
-
     prediction,
-
     risk_level,
-
     sender_info
-
 ):
-
-
-
     verified = sender_info["verified"]
 
     if risk_level == "SAFE":
-
         if verified:
-
             return SAFE_VERIFIED
-
         return SAFE_UNVERIFIED
 
     if risk_level == "MODERATE":
-
         if verified:
-
             return MODERATE_VERIFIED
-
         return MODERATE_UNVERIFIED
 
     if verified:
-
         return SCAM_VERIFIED
-
     return SCAM_UNVERIFIED
-
 
 # ==========================================================
 # BUILD RESPONSE
 # ==========================================================
 
 def build_response(
-
     sender,
-
     message
-
 ):
-
-    # ---------------------------------------------
-    # Sender Validation
-    # ---------------------------------------------
-
     sender_info = verify_sender(sender)
-
-    # ---------------------------------------------
-    # AI Prediction
-    # ---------------------------------------------
-
     prediction = predict_message(message)
-
-    # ---------------------------------------------
-    # NON BANK
-    # ---------------------------------------------
-
-
-
-    # ---------------------------------------------
-    # Risk Calculation
-    # ---------------------------------------------
-
     risk = calculate_risk(
-
         prediction,
-
         sender_info["verified"]
-
     )
-
-    # ---------------------------------------------
-    # Explanation
-    # ---------------------------------------------
-
     reasons = generate_explanation(
-
         prediction["prediction"],
-
         risk["risk_level"],
-
         sender_info
-
     )
-
-    # ---------------------------------------------
-    # Final JSON
-    # ---------------------------------------------
 
     return {
-
-    "prediction": prediction["prediction"],
-
-    "classification_confidence": prediction["confidence"],
-
-    "risk_score": risk["risk_score"],
-
-    "risk_level": risk["risk_level"],
-
-    "sender_status": sender_info["status"],
-
-    "sender_id": sender_info["sender_id"],
-
-    "bank_name": sender_info["bank_name"],
-
-    "reasons": reasons
-
-}
-
-
-# ==========================================================
-# HEALTH CHECK
-# ==========================================================
-
+        "prediction": prediction["prediction"],
+        "classification_confidence": prediction["confidence"],
+        "risk_score": risk["risk_score"],
+        "risk_level": risk["risk_level"],
+        "sender_status": sender_info["status"],
+        "sender_id": sender_info["sender_id"],
+        "bank_name": sender_info["bank_name"],
+        "reasons": reasons
+    }
 
 # ==========================================================
 # MAIN API
 # ==========================================================
 
 @app.post("/analyze")
-
 def analyze(data: AnalyzeRequest):
-
     result = build_response(
-
         sender=data.sender,
-
         message=data.message
-
     )
-
     return result
-
 
 # ==========================================================
 # LOCAL RUN
 # ==========================================================
 
 if __name__ == "__main__":
-
     import uvicorn
-
     uvicorn.run(
-
         "app:app",
-
         host="0.0.0.0",
-
         port=8000,
-
         reload=True
-
     )
