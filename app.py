@@ -9,7 +9,7 @@ import time
 
 import re
 from pathlib import Path
-
+import torch
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 import os
