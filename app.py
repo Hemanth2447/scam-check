@@ -7,6 +7,7 @@ import json
 import torch
 import time
 import gc
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -58,18 +59,22 @@ def get_model_and_tokenizer():
         print(" LOADING SENTRY MODEL ON-DEMAND ")
         print("=" * 60)
         
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-        
-        model = AutoModelForSequenceClassification.from_pretrained(
-            MODEL_DIR,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.float16
-        )
-        model.eval()
-        torch.set_num_threads(1)
-        
-        gc.collect()
-        print("✅ Model loaded successfully in float16 mode.")
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
+            model = AutoModelForSequenceClassification.from_pretrained(
+                MODEL_DIR,
+                low_cpu_mem_usage=True,
+                torch_dtype=torch.float16
+            )
+            model.eval()
+            torch.set_num_threads(1)
+            gc.collect()
+            print("✅ Model loaded successfully.")
+        except Exception as e:
+            print(f"⚠️ Model load failed or model folder not present: {e}")
+            model = None
+            tokenizer = None
+            
     return model, tokenizer
 
 # ==========================================================
@@ -81,25 +86,126 @@ print("=" * 60)
 print(" LOADING VERIFIED TRAI HEADERS ")
 print("=" * 60)
 
-with open(
-    HEADERS_FILE,
-    "r",
-    encoding="utf-8"
-) as f:
-    VERIFIED_HEADERS = json.load(f)
-
-print(
-    f"[SUCCESS] Loaded {len(VERIFIED_HEADERS)} Verified Headers."
-)
+VERIFIED_HEADERS = {}
+if HEADERS_FILE.exists():
+    with open(
+        HEADERS_FILE,
+        "r",
+        encoding="utf-8"
+    ) as f:
+        VERIFIED_HEADERS = json.load(f)
+    print(f"[SUCCESS] Loaded {len(VERIFIED_HEADERS)} Verified Headers.")
+else:
+    print(f"[WARNING] Headers file not found at {HEADERS_FILE}")
 
 # ==========================================================
-# LABELS
+# LABELS (STRICTLY SAFE AND SCAM)
 # ==========================================================
 
 LABELS = {
     0: "SAFE",
     1: "SCAM"
 }
+
+# ==========================================================
+# KEYWORD MATCHING ENGINE (EXTENSIVE LIST)
+# ==========================================================
+
+SCAM_KEYWORDS = [
+    # Financial Urgency / Threats / Extortion
+    "account blocked", "account suspended", "account deactivated", "account freeze", "account closed",
+    "card blocked", "debit card blocked", "credit card blocked", "sim blocked", "sim will be blocked",
+    "electricity disconnect", "power disconnected", "power cut tonight", "bill overdue disconnect",
+    "fine of rs", "penalty of rs", "legal notice", "arrest warrant", "police case", "court order",
+    "action required immediately", "within 24 hours", "within 12 hours", "urgent update",
+    "unauthorized transaction reported",
+
+    # KYC & Verification Traps
+    "kyc expired", "update kyc", "complete your kyc", "pan card not linked", "aadhaar not linked",
+    "pan update pending", "kyc verification failed", "unblock account click", "re-activate your account",
+
+    # Lottery, Rewards, Cashbacks & Fake Lures
+    "lottery", "won lottery", "you have won", "won prize", "winner", "lucky winner",
+    "congratulations you won", "lucky draw", "claim your reward", "claim reward", "reward points expire",
+    "redeem reward points", "cashback of rs", "cashback credited claim", "cash prize", "free gift",
+    "gift voucher worth", "scratch card", "claim bonus", "claim refund", "income tax refund",
+    "tax refund approved", "pre-approved loan of rs", "instant loan without cibil",
+
+    # Phishing Calls-to-Action & Credential Harvesting
+    "click here to", "click link to", "visit link", "login to verify", "update here:",
+    "download apk", "install quicksupport", "install anydesk", "install rustdesk", "install teamviewer",
+    "support apk", "customer care call", "toll free number:", "share otp to cancel", "forward this sms",
+    "enter upi pin to receive", "send upi pin", "enter pin to get money",
+
+    # Suspicious URL Shorteners & Suspicious Domains
+    "bit.ly/", "tinyurl.com/", "is.gd/", "cutt.ly/", "rb.gy/", "t.co/", "shorturl.at/",
+    ".apk", ".xyz", ".top", ".ru", ".tk", ".work", ".click", ".link/",
+
+    # Work-from-Home & Telegram Scams
+    "part time job", "work from home earn", "daily income rs", "earn 2000-5000",
+    "telegram task", "like youtube videos", "crypto investment earn", "double your money"
+]
+
+SAFE_KEYWORDS = [
+    # Banking Transactions
+    "debited by", "debited with", "credited with", "credited by", "deposited", "withdrawn from",
+    "spent on", "avl bal", "available balance", "ac bal", "account balance", "a/c no", "a/c x",
+    "a/c *", "acct ending", "ref no", "ref no:", "rrn", "rrn:", "utr", "utr:", "txn id",
+    "transaction id", "transaction successful", "payment successful", "money sent to", "received rs",
+    "salary credited", "interest credited", "atm cash withdrawal", "neft", "rtgs", "imps",
+    "upi ref", "mandate created", "autopay", "cleared through cheque",
+
+    # Legitimate Authentication & Verification Codes
+    "otp", "one time password", "verification code", "security code", "login otp", "auth code",
+    "secret otp", "do not share", "valid for", "expires in", "sample test", "birth and death",
+    "registration otp", "password reset code",
+
+    # Telecom & Data Notifications (Airtel, Jio, Vi, BSNL)
+    "consumed", "data consumed", "daily data limit", "data balance", "50% alert", "90% alert",
+    "100% alert", "pack validity", "recharge successful", "bill paid", "plan expires",
+    "validity recharge", "talktime", "unlimited calls", "airtel", "jio", "vodafone", "vi ", "bsnl",
+
+    # Utilities & Booking Services
+    "welcome to", "order confirmed", "order delivered", "shipped", "out for delivery",
+    "pnr", "booking confirmed", "ticket confirmed", "flight status", "electricity bill paid",
+    "gas bill paid", "water bill paid", "statement for your", "thank you for using",
+
+    # Multilingual Telecom / Service (e.g. Tamil alerts)
+    "டேட்டா", "ரீசார்ஜ்", "இருப்பு", "செலுத்தப்பட்டது", "வங்கி"
+]
+
+def keyword_match_classification(message: str, sender: str = ""):
+    """
+    Classifies a message as SAFE or SCAM strictly using comprehensive keyword matching.
+    """
+    clean_text = (message or "").strip().lower()
+    clean_sender = (sender or "").strip().lower()
+
+    # 1. Check for SCAM keywords
+    matched_scam = [kw for kw in SCAM_KEYWORDS if kw in clean_text]
+    
+    # Suspicious external links
+    if re.search(r'https?://[^\s]+(?:\.xyz|\.top|\.ru|\.tk|\.click)', clean_text) or ".apk" in clean_text or "http://" in clean_text:
+        matched_scam.append("untrusted_link")
+
+    # 2. Check for SAFE keywords
+    matched_safe = [kw for kw in SAFE_KEYWORDS if kw in clean_text]
+
+    # Decision logic
+    if matched_scam:
+        confidence = min(98.0, 85.0 + len(matched_scam) * 4.0)
+        return "SCAM", confidence, matched_scam
+
+    if matched_safe:
+        confidence = min(98.0, 88.0 + len(matched_safe) * 3.0)
+        return "SAFE", confidence, matched_safe
+
+    # Check verified TRAI sender formats (e.g., AD-HDFCBK, JM-GCCCRP-S, AT-AIRTEL-S)
+    if re.match(r'^[a-z]{2}-[a-z0-9]{5,8}(-[a-z0-9])?$', clean_sender):
+        return "SAFE", 90.0, ["verified_sender_format"]
+
+    # If no risk or threat triggers are found, classify as SAFE
+    return "SAFE", 85.0, ["no_suspicious_patterns"]
 
 # ==========================================================
 # EXPLANATION TEMPLATES
@@ -112,8 +218,8 @@ SAFE_VERIFIED = [
 ]
 
 SAFE_UNVERIFIED = [
-    "The message was classified as a legitimate banking notification.",
-    "The sender ID could not be verified.",
+    "The message was classified as a legitimate notification.",
+    "The sender ID could not be verified in the national bank registry.",
     "The calculated risk score is low."
 ]
 
@@ -131,14 +237,14 @@ MODERATE_UNVERIFIED = [
 
 SCAM_VERIFIED = [
     "The message has been classified as high risk.",
-    "The sender ID is verified but the content appears suspicious.",
+    "The sender ID is verified but the content contains deceptive scam triggers.",
     "Avoid acting until independently verified."
 ]
 
 SCAM_UNVERIFIED = [
     "The message has been classified as high risk.",
     "The sender ID could not be verified.",
-    "Do not interact with the message until verified."
+    "Do not interact with the message or open any links."
 ]
 
 # ==========================================================
@@ -243,53 +349,85 @@ def verify_sender(sender: str):
     }
 
 # ==========================================================
-# MODEL PREDICTION (With Lazy Loading)
+# MODEL & KEYWORD PREDICTION
 # ==========================================================
 
-def predict_message(message: str):
+def predict_message(message: str, sender: str = ""):
+    # 1. Primary Keyword Matching Analysis
+    kw_prediction, kw_confidence, matched_keywords = keyword_match_classification(message, sender=sender)
+
+    # 2. Try ML Model Inference if available
     curr_model, curr_tokenizer = get_model_and_tokenizer()
 
-    inputs = curr_tokenizer(
-        message,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=64
-    )
+    if curr_model is not None and curr_tokenizer is not None:
+        try:
+            inputs = curr_tokenizer(
+                message,
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=64
+            )
+            inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
+            start = time.time()
 
-    inputs = {
-        k: v.to(DEVICE)
-        for k, v in inputs.items()
-    }
-    
-    start = time.time()
+            with torch.inference_mode():
+                outputs = curr_model(**inputs)
 
-    with torch.inference_mode():
-        outputs = curr_model(**inputs)
+            print(f"Inference Time: {time.time() - start:.2f} sec")
 
-    print(f"Inference Time: {time.time() - start:.2f} sec")
+            probabilities = torch.softmax(outputs.logits, dim=1)[0]
+            
+            # If model was trained on 3 classes [SAFE, SCAM, NON_BANK]:
+            # Treat NON_BANK as SAFE unless keywords say SCAM
+            p_safe = float(probabilities[0]) * 100
+            p_scam = float(probabilities[1]) * 100
+            
+            if kw_prediction == "SCAM":
+                final_pred = "SCAM"
+                scam_prob = max(85.0, p_scam)
+                safe_prob = 100.0 - scam_prob
+                conf = kw_confidence
+            elif kw_prediction == "SAFE":
+                final_pred = "SAFE"
+                safe_prob = max(85.0, p_safe)
+                scam_prob = 100.0 - safe_prob
+                conf = kw_confidence
+            else:
+                pred_idx = int(torch.argmax(probabilities))
+                if pred_idx == 1:
+                    final_pred = "SCAM"
+                    scam_prob = p_scam
+                    safe_prob = 100.0 - p_scam
+                else:
+                    final_pred = "SAFE"
+                    safe_prob = p_safe
+                    scam_prob = 100.0 - p_safe
+                conf = float(probabilities[pred_idx]) * 100
 
-    probabilities = torch.softmax(
-        outputs.logits,
-        dim=1
-    )[0]
+            del inputs, outputs, probabilities
+            gc.collect()
 
-    safe_prob = float(probabilities[0]) * 100
-    scam_prob = float(probabilities[1]) * 100
-    
-    prediction = int(torch.argmax(probabilities))
-    confidence = float(probabilities[prediction]) * 100
+            return {
+                "prediction": final_pred,
+                "confidence": round(conf, 2),
+                "safe_probability": round(safe_prob, 2),
+                "scam_probability": round(scam_prob, 2),
+                "matched_keywords": matched_keywords
+            }
+        except Exception as e:
+            print(f"Inference exception: {e}")
 
-    del inputs
-    del outputs
-    del probabilities
-    gc.collect()
+    # Fallback to pure Keyword Engine
+    scam_prob = 90.0 if kw_prediction == "SCAM" else 10.0
+    safe_prob = 100.0 - scam_prob
 
     return {
-        "prediction": LABELS.get(prediction, "SCAM"),
-        "confidence": round(confidence, 2),
+        "prediction": kw_prediction,
+        "confidence": round(kw_confidence, 2),
         "safe_probability": round(safe_prob, 2),
-        "scam_probability": round(scam_prob, 2)
+        "scam_probability": round(scam_prob, 2),
+        "matched_keywords": matched_keywords
     }
 
 # ==========================================================
@@ -302,14 +440,14 @@ def calculate_risk(
 ):
     risk = prediction["scam_probability"]
 
-    if verified:
-        risk = risk - 10
+    if verified and risk < 70:
+        risk = max(0, risk - 10)
 
     risk = max(0, min(100, risk))
 
-    if risk <= 50:
+    if risk <= 40:
         level = "SAFE"
-    elif risk <= 75:
+    elif risk <= 70:
         level = "MODERATE"
     else:
         level = "HIGH_RISK"
@@ -331,11 +469,12 @@ print("[SUCCESS] Risk Engine Loaded.")
 def generate_explanation(
     prediction,
     risk_level,
-    sender_info
+    sender_info,
+    matched_keywords=None
 ):
     verified = sender_info["verified"]
 
-    if risk_level == "SAFE":
+    if prediction == "SAFE":
         if verified:
             return SAFE_VERIFIED
         return SAFE_UNVERIFIED
@@ -358,7 +497,7 @@ def build_response(
     message
 ):
     sender_info = verify_sender(sender)
-    prediction = predict_message(message)
+    prediction = predict_message(message, sender=sender)
     risk = calculate_risk(
         prediction,
         sender_info["verified"]
@@ -366,7 +505,8 @@ def build_response(
     reasons = generate_explanation(
         prediction["prediction"],
         risk["risk_level"],
-        sender_info
+        sender_info,
+        matched_keywords=prediction.get("matched_keywords")
     )
 
     return {
@@ -377,7 +517,8 @@ def build_response(
         "sender_status": sender_info["status"],
         "sender_id": sender_info["sender_id"],
         "bank_name": sender_info["bank_name"],
-        "reasons": reasons
+        "reasons": reasons,
+        "matched_keywords": prediction.get("matched_keywords", [])
     }
 
 # ==========================================================
