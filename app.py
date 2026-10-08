@@ -9,7 +9,7 @@ import time
 
 import re
 from pathlib import Path
-import torch
+
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
 import os
@@ -31,50 +31,6 @@ HEADERS_FILE = (
     / "sender_validation"
     / "verified_bank_headers.json"
 )
-
-# ==========================================================
-# DEVICE CONFIGURATION
-# ==========================================================
-
-DEVICE = torch.device(
-    "cuda"
-    if torch.cuda.is_available()
-    else "cpu"
-)
-
-print(f"Device : {DEVICE}")
-
-# ==========================================================
-# LAZY LOADING STATE (Prevents Render OOM on startup)
-# ==========================================================
-
-model = None
-tokenizer = None
-
-def get_model_and_tokenizer():
-    global model, tokenizer
-    if model is None:
-        print("=" * 60)
-        print(" LOADING SENTRY MODEL ON-DEMAND ")
-        print("=" * 60)
-        
-        try:
-            tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-            model = AutoModelForSequenceClassification.from_pretrained(
-                MODEL_DIR,
-                low_cpu_mem_usage=True,
-                torch_dtype=torch.float16
-            )
-            model.eval()
-            torch.set_num_threads(1)
-            gc.collect()
-            print("✅ Model loaded successfully.")
-        except Exception as e:
-            print(f"⚠️ Model load failed or model folder not present: {e}")
-            model = None
-            tokenizer = None
-            
-    return model, tokenizer
 
 # ==========================================================
 # LOAD VERIFIED HEADERS
