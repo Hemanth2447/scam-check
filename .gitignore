@@ -31,3 +31,5 @@ model/checkpoint-*/
 model/training_args.bin
 model/classification_report.txt
 model/confusion_matrix.csv
+model/
+model.zip

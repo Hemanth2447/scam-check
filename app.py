@@ -4,20 +4,19 @@
 # ==========================================================
 
 import json
-import torch
+
 import time
-import gc
+
 import re
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
-
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification
-)
-
+import os
+import requests
+HF_MODEL_URL = "https://api-inference.huggingface.co/models/Nope112300/sentrypay-distilbert"
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 # ==========================================================
 # PATHS
 # ==========================================================
@@ -351,84 +350,82 @@ def verify_sender(sender: str):
 # ==========================================================
 # MODEL & KEYWORD PREDICTION
 # ==========================================================
-
 def predict_message(message: str, sender: str = ""):
-    # 1. Primary Keyword Matching Analysis
-    kw_prediction, kw_confidence, matched_keywords = keyword_match_classification(message, sender=sender)
+  # 1. Primary Keyword Matching Analysis
+  kw_prediction, kw_confidence, matched_keywords = (
+      keyword_match_classification(message, sender=sender)
+  )
 
-    # 2. Try ML Model Inference if available
-    curr_model, curr_tokenizer = get_model_and_tokenizer()
+  # 2. Try Hugging Face Serverless Inference API
+  try:
+    response = requests.post(
+        HF_MODEL_URL, headers=HF_HEADERS, json={"inputs": message}, timeout=5
+    )
 
-    if curr_model is not None and curr_tokenizer is not None:
-        try:
-            inputs = curr_tokenizer(
-                message,
-                return_tensors="pt",
-                truncation=True,
-                padding=True,
-                max_length=64
-            )
-            inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
-            start = time.time()
+    if response.status_code == 200:
+      hf_data = response.json()
 
-            with torch.inference_mode():
-                outputs = curr_model(**inputs)
+      # Flatten nested lists if returned
+      if isinstance(hf_data, list) and len(hf_data) > 0:
+        if isinstance(hf_data[0], list):
+          hf_results = hf_data[0]
+        else:
+          hf_results = hf_data
 
-            print(f"Inference Time: {time.time() - start:.2f} sec")
+        # Map predictions to probabilities
+        prob_map = {
+            item["label"].upper(): item["score"] * 100 for item in hf_results
+        }
+        p_safe = prob_map.get("SAFE", prob_map.get("LABEL_0", 0.0))
+        p_scam = prob_map.get("SCAM", prob_map.get("LABEL_1", 0.0))
 
-            probabilities = torch.softmax(outputs.logits, dim=1)[0]
-            
-            # If model was trained on 3 classes [SAFE, SCAM, NON_BANK]:
-            # Treat NON_BANK as SAFE unless keywords say SCAM
-            p_safe = float(probabilities[0]) * 100
-            p_scam = float(probabilities[1]) * 100
-            
-            if kw_prediction == "SCAM":
-                final_pred = "SCAM"
-                scam_prob = max(85.0, p_scam)
-                safe_prob = 100.0 - scam_prob
-                conf = kw_confidence
-            elif kw_prediction == "SAFE":
-                final_pred = "SAFE"
-                safe_prob = max(85.0, p_safe)
-                scam_prob = 100.0 - safe_prob
-                conf = kw_confidence
-            else:
-                pred_idx = int(torch.argmax(probabilities))
-                if pred_idx == 1:
-                    final_pred = "SCAM"
-                    scam_prob = p_scam
-                    safe_prob = 100.0 - p_scam
-                else:
-                    final_pred = "SAFE"
-                    safe_prob = p_safe
-                    scam_prob = 100.0 - p_safe
-                conf = float(probabilities[pred_idx]) * 100
+        # Combine Keyword rules with HF Model probabilities
+        if kw_prediction == "SCAM":
+          final_pred = "SCAM"
+          scam_prob = max(85.0, p_scam)
+          safe_prob = 100.0 - scam_prob
+          conf = kw_confidence
+        elif kw_prediction == "SAFE":
+          final_pred = "SAFE"
+          safe_prob = max(85.0, p_safe)
+          scam_prob = 100.0 - safe_prob
+          conf = kw_confidence
+        else:
+          top_item = max(hf_results, key=lambda x: x["score"])
+          raw_label = top_item["label"].upper()
 
-            del inputs, outputs, probabilities
-            gc.collect()
+          if raw_label in ["SCAM", "LABEL_1"]:
+            final_pred = "SCAM"
+            scam_prob = p_scam
+            safe_prob = 100.0 - p_scam
+          else:
+            final_pred = "SAFE"
+            safe_prob = p_safe
+            scam_prob = 100.0 - p_safe
 
-            return {
-                "prediction": final_pred,
-                "confidence": round(conf, 2),
-                "safe_probability": round(safe_prob, 2),
-                "scam_probability": round(scam_prob, 2),
-                "matched_keywords": matched_keywords
-            }
-        except Exception as e:
-            print(f"Inference exception: {e}")
+          conf = top_item["score"] * 100
 
-    # Fallback to pure Keyword Engine
-    scam_prob = 90.0 if kw_prediction == "SCAM" else 10.0
-    safe_prob = 100.0 - scam_prob
+        return {
+            "prediction": final_pred,
+            "confidence": round(conf, 2),
+            "safe_probability": round(safe_prob, 2),
+            "scam_probability": round(scam_prob, 2),
+            "matched_keywords": matched_keywords,
+        }
+  except Exception as e:
+    print(f"Hugging Face API call failed: {e}")
 
-    return {
-        "prediction": kw_prediction,
-        "confidence": round(kw_confidence, 2),
-        "safe_probability": round(safe_prob, 2),
-        "scam_probability": round(scam_prob, 2),
-        "matched_keywords": matched_keywords
-    }
+  # 3. Fallback to pure Keyword Engine
+  scam_prob = 90.0 if kw_prediction == "SCAM" else 10.0
+  safe_prob = 100.0 - scam_prob
+
+  return {
+      "prediction": kw_prediction,
+      "confidence": round(kw_confidence, 2),
+      "safe_probability": round(safe_prob, 2),
+      "scam_probability": round(scam_prob, 2),
+      "matched_keywords": matched_keywords,
+  }
 
 # ==========================================================
 # RISK SCORE
