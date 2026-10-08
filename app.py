@@ -14,7 +14,8 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 import os
 import requests
-HF_MODEL_URL = "https://api-inference.huggingface.co/models/Nope112300/sentrypay-distilbert"
+# Change from api-inference.huggingface.co to router.huggingface.co
+HF_MODEL_URL = "https://router.huggingface.co/hf-inference/models/Nope112300/sentrypay-distilbert"
 HF_TOKEN = os.getenv("HF_TOKEN", "")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 # ==========================================================
@@ -210,14 +211,6 @@ app = FastAPI(
     title="Sentry Pay Scam Detection API",
     version="1.0.0"
 )
-
-@app.middleware("http")
-async def handle_head_requests(request: Request, call_next):
-    if request.method == "HEAD":
-        request.scope["method"] = "GET"
-
-    response = await call_next(request)
-    return response
 
 @app.get("/")
 def root():
